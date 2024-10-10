@@ -1,0 +1,189 @@
+---
+title: "604Project2"
+author: "Andy Guo"
+date: "2024-09-19"
+output: bookdown::pdf_document2
+---
+
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(sva)
+```
+
+# Corrected data
+
+```{r}
+load("brain.rda")
+comb <- read.csv("corrected_expression.csv")
+colnames(comb)[(ncol(comb) - ncol(expression) + 1):ncol(comb)] <- colnames(expression)
+comb = cbind(samples, comb)
+```
+
+# Gene list interested
+
+```{r}
+gene_list_sex <- unique(c(gene_list_sex <- unique(c("41214_at", "38355_at", "37583_at", "35885_at", "1000_at", "35680_r_at", "31687_f_at", "38446_at"))))
+
+gene_list_region <- unique(c(gene_list_region <- unique(c("37134_f_at", "37135_f_at", "34500_at", "36150_at", "38516_at", "35457_at", "396_f_at", "39854_r_at", "1826_at", "33903_at", "31957_r_at"))))
+```
+
+# whole bayesian
+
+```{r}
+# Load necessary libraries
+library(MASS)
+library(MCMCpack)
+library(ggplot2)
+library(reshape2)
+
+# Function to update theta (mu) in the Gibbs sampler with regularization
+update_theta <- function(Y, sigma_0, sigma, mu_0, epsilon = 1e-6) {
+  sample_size <- nrow(Y)
+  Y_bar <- apply(Y, 2, mean)
+    
+  # Add regularization to avoid singular matrix issues
+  A_n <- solve(sigma_0) + sample_size * solve(sigma + diag(epsilon, ncol(sigma)))
+  sigma_n <- solve(A_n)
+  b_n <- solve(sigma_0) %*% mu_0 + sample_size * 
+    solve(sigma + diag(epsilon, ncol(sigma))) %*% Y_bar
+  theta <- mvrnorm(1, sigma_n %*% b_n, sigma_n)
+  return(theta)
+}
+
+# Function to update sigma (covariance matrix) in the Gibbs sampler with regularization
+update_sigma <- function(nu_0, Y, s_0, theta, epsilon = 1e-6) {
+  sample_size <- nrow(Y)
+  s_n <- s_0
+    
+  # Calculate the sum of squared deviations
+  for (j in 1:sample_size) {
+    deviation <- Y[j, ] - theta
+    s_n <- s_n + (t(as.matrix(deviation)) %*% as.matrix(deviation))
+  }
+    
+  # Add regularization to avoid singular matrix issues
+  sigma <- solve(rWishart(1, nu_0 + sample_size, solve(s_n + diag(epsilon, ncol(s_n))))[,,1])
+  return(sigma)
+}
+
+# Function to plot heatmap of the covariance matrix
+plot_covariance_heatmap <- function(cov_matrix, gene_list, group_name) {
+  melted_cov <- melt(cov_matrix)
+  colnames(melted_cov) <- c("Gene1", "Gene2", "value")
+  melted_cov$Gene1 <- factor(melted_cov$Gene1, labels = gene_list)
+  melted_cov$Gene2 <- factor(melted_cov$Gene2, labels = gene_list)
+  
+  ggplot(melted_cov, aes(x = Gene1, y = Gene2, fill = value)) +
+    geom_tile() +
+    scale_fill_gradient(low = "white", high = "blue") +
+    theme_minimal() +
+    labs(title = paste("Posterior Covariance Matrix:", group_name),
+         x = "Gene", y = "Gene")
+}
+
+# Function to perform Bayesian analysis for group comparison
+Bayesian <- function(comb, gene_list, divide_by, group1_name="Group 1", group2_name="Group 2") {
+  
+  # Subset the dataset for the selected genes and the group of interest
+  selected_genes <- comb[, c(gene_list, divide_by)]
+  
+  # Split the data into two groups based on the division criteria ('sex' or 'region')
+  X1 <- selected_genes[selected_genes[[divide_by]] == unique(comb[[divide_by]])[1], gene_list]
+  X2 <- selected_genes[selected_genes[[divide_by]] == unique(comb[[divide_by]])[2], gene_list]
+
+  # Prior parameters
+  top_n <- length(gene_list)
+  mu_0 <- colMeans(rbind(X1, X2))
+  s_0 <- diag(1, top_n)
+  sigma_0 <- diag(1, top_n)
+  nu_0 <- top_n + 2
+
+  # MCMC setup
+  n_rep <- 1100  # Number of repetitions (iterations)
+
+  Theta_X1 <- matrix(NA, nrow = n_rep, ncol = top_n)
+  Sigma_X1 <- matrix(NA, nrow = n_rep, ncol = top_n^2)
+  Theta_X2 <- matrix(NA, nrow = n_rep, ncol = top_n)
+  Sigma_X2 <- matrix(NA, nrow = n_rep, ncol = top_n^2)
+
+  # Initial values for the covariance matrices (based on the data)
+  sigma_X1 <- cov(X1)
+  sigma_X2 <- cov(X2)
+
+  set.seed(72)
+
+  epsilon <- 1e-6
+
+  for (i in 1:n_rep) {
+    # Update theta and sigma for the first group
+    theta_X1 <- update_theta(X1, sigma_0, sigma_X1, mu_0, epsilon)
+    sigma_X1 <- update_sigma(nu_0, X1, s_0, theta_X1, epsilon)
+    Theta_X1[i, ] <- theta_X1
+    Sigma_X1[i, ] <- as.vector(sigma_X1) 
+    
+    # Update theta and sigma for the second group
+    theta_X2 <- update_theta(X2, sigma_0, sigma_X2, mu_0, epsilon)
+    sigma_X2 <- update_sigma(nu_0, X2, s_0, theta_X2, epsilon)
+    Theta_X2[i, ] <- theta_X2
+    Sigma_X2[i, ] <- as.vector(sigma_X2)
+  }
+
+  burn_in <- 100
+
+  # Compute posterior means for both groups
+  theta_X1_est <- colMeans(Theta_X1[(burn_in+1):n_rep, ])
+  sigma_X1_est <- apply(Sigma_X1[(burn_in+1):n_rep, ], 2, mean)
+  
+  theta_X2_est <- colMeans(Theta_X2[(burn_in+1):n_rep, ])
+  sigma_X2_est <- apply(Sigma_X2[(burn_in+1):n_rep, ], 2, mean)
+
+  # Compute mean differences between the two groups
+  mean_diff <- abs(theta_X1_est - theta_X2_est)
+
+  # Use match to correctly map GeneName to rownames in genes dataset for Bayesian results
+  gene_indices <- match(gene_list, rownames(genes))
+  chromosome_bayesian <- genes$chrom[gene_indices]
+  gene_symbol_bayesian <- genes$sym[gene_indices]
+
+  # Bayesian result with chromosome and gene symbol information
+  bayesian_result <- data.frame(
+    GeneName = gene_list,
+    MeanDiff = mean_diff,
+    Chromosome = chromosome_bayesian,
+    Symbol = gene_symbol_bayesian
+  )
+
+  # Rank the result by MeanDiff and return it
+  bayesian_result <- bayesian_result[order(-bayesian_result$MeanDiff), ]
+  
+  # Convert posterior covariance matrices to matrix form
+  sigma_X1_mat <- matrix(sigma_X1_est, nrow = top_n, ncol = top_n)
+  sigma_X2_mat <- matrix(sigma_X2_est, nrow = top_n, ncol = top_n)
+  
+  # Plot heatmaps for both covariance matrices
+  print(plot_covariance_heatmap(sigma_X1_mat, gene_list, group1_name))
+  print(plot_covariance_heatmap(sigma_X2_mat, gene_list, group2_name))
+  
+  return(bayesian_result)
+}
+```
+
+# Sex
+
+```{r}
+result_sex <- Bayesian(comb, gene_list_sex, 
+                       "sex", "male", "female")
+print(result_sex)
+```
+
+# Region
+
+```{r}
+result_region <- Bayesian(comb, gene_list_region, 
+                          "region", "A.C. cortex", "D.L.P.F. cortex")
+print(result_region)
+```
+
